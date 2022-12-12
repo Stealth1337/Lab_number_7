@@ -1,15 +1,16 @@
-import sys, random, math
-from PyQt5 import QtGui, QtCore, uic
+import sys, math
+import types
+
 from PyQt5 import QtWidgets
-from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget, QColorDialog, QFileDialog, QMessageBox
+from PyQt5.QtWidgets import QApplication, QMainWindow, QColorDialog, QFileDialog, QMessageBox
 from PyQt5.QtGui import QPainter, QPainterPath, QBrush, QPen, QColor, QPolygon
 from PyQt5.QtCore import Qt, QPoint, pyqtSignal, QRect, QMargins
 from design import Ui_MainWindow
 import logging
 import xml.etree.ElementTree as ET
 
-COLOR_SELECTED = Qt.red
-COLOR_BORDER = Qt.gray
+COLOR_SELECTED = QColor(Qt.red)
+COLOR_BORDER = QColor(Qt.gray)
 INITIAL_SIZE = 50
 INITIAL_RADIUS = INITIAL_SIZE // 2
 STEP_CHANGE_SIZE = 10 // 2
@@ -19,8 +20,10 @@ class Shape():
     _linked_widget = None
     _is_current = False
 
-    def __init__(self, point, color, length=INITIAL_SIZE, activate=False):
-        self._rect = QRect(0, 0, length, length)
+    def __init__(self, point, color, length=INITIAL_SIZE, activate=False, width=None, height=None):
+        width = length if width is None else width
+        height = length if height is None else height
+        self._rect = QRect(0, 0, width, height)
         self._rect.moveCenter(point)
         self._activate = activate
         self._color = color
@@ -47,7 +50,7 @@ class Shape():
 
     @property
     def color(self):
-        return COLOR_SELECTED if self._activate else self._color
+        return COLOR_SELECTED if self.getStatus() else self._color
 
     @color.setter
     def color(self, color):
@@ -82,15 +85,10 @@ class Shape():
         return self._rect.united(canvas) == canvas
 
     def addMargins(self, size_margins):
-        return QMargins(size_margins,
-                        size_margins,
-                        size_margins,
-                        size_margins)
+        return QMargins(*((size_margins,) * 4))
 
     def is_valid_size(self, shape_copy: QRect):
-        if shape_copy.width() < 10 and shape_copy.height() < 10:
-            return False
-        return True
+        return shape_copy.width() >= 10 and shape_copy.height() >= 10
 
     def move_inplace(self, canvas: QRect, dx, dy):
         old_rect = self._rect
@@ -103,10 +101,9 @@ class Shape():
     def changesize(self, canvas: QRect, dsize):
         old_rect = self._rect
         self._rect = self._rect + self.addMargins(dsize)
-        if (not self.is_inner_canvas(canvas)) or (not self.is_valid_size(self._rect + self.addMargins(dsize))):
+        if not (self.is_inner_canvas(canvas) and self.is_valid_size(self._rect)):
             self._rect = old_rect
             return False
-        print(self._rect)
         return True
 
     def save(self) -> ET:
@@ -118,6 +115,25 @@ class Shape():
         rect.set('width', str(self.rect.width()))
         rect.set('height', str(self.rect.height()))
         return element
+
+    @staticmethod
+    def load(element: ET) -> 'Shape':
+        element_class = globals()[element.tag]
+        print(element_class)
+        if isinstance(element_class, type) and issubclass(element_class, Shape):
+            return element_class._factory_load(element)
+
+    @classmethod
+    def _factory_load(cls, element: ET) -> 'Shape':
+        rect = element.find('rect')
+        rect = QRect(*map(int, (rect.get(s, 0) for s in
+                                ['left', 'top', 'width', 'height']
+                                )))
+        point = rect.center()
+        color = QColor(element.get('color', Qt.black))
+        width = rect.width()
+        height = rect.height()
+        return cls(point, color, width=width, height=height)
 
 
 ### CLASS CIRCLE ###=====
@@ -167,8 +183,6 @@ class Triangle(Shape):
                 self._rect.bottomRight(),
                 self._rect.bottomLeft()
             ])
-            return True
-        return False
 
     def save(self) -> ET:
         element = super().save()
@@ -184,72 +198,91 @@ class Triangle(Shape):
 
 ### CLASS GROUP ###
 class Group(Shape):
-
-    def __init__(self):
+    def __init__(self, point=None, color=None, length=INITIAL_SIZE, activate=False, width=None, height=None):
+        if point is None:
+            point = QPoint(0, 0)
+        if color is None:
+            color = QColor(Qt.black)
+        super().__init__(point, color, length=length, activate=activate, width=width, height=height)
         self._childrens = []
-        self._rect = None
-        self._activate = False
-        self._color = Qt.black
-        self.canmove = True
 
-    def updateRect(self) -> QRect:
-        self._rect = QRect(self._childrens[0].rect.x(),
-                           self._childrens[0].rect.y(),
-                           self._childrens[0].rect.width(),
-                           self._childrens[0].rect.height())
+    def __len__(self):
+        return len(self._childrens)
+
+    def __getitem__(self, item) -> Shape:
+        return self._childrens[item]
+
+    def _updateRect(self) -> QRect:
+        self._rect = QRect()
         if self._childrens:
-            for child in self._childrens:
+            self._rect = QRect(self._childrens[0].rect)
+            for child in self:
                 self._rect = child.rect.united(self._rect)
 
     def draw(self, painter):
+        brush_style = Qt.Dense6Pattern if self.getStatus() else Qt.NoBrush
+        pen_color = COLOR_SELECTED if self.getStatus() else QColor(Qt.black)
+        painter.save()
+        painter.setPen(QPen(pen_color, 0, Qt.DashLine))
+        painter.setBrush(QBrush(self.color, brush_style))
         painter.drawRect(self._rect)
-        for elem in self._childrens:
+        painter.restore()
+        for elem in self:
             elem.draw(painter)
 
-    def deactivate(self):
-        for elem in self._childrens:
-            elem._activate = False
-        self._activate = False
-
     def changeFlag(self):
-        for elem in self._childrens:
-            elem._activate = not elem._activate
-        self._activate = not self._activate
+        super().changeFlag()
+        for elem in self:
+            elem.changeFlag()
+
+    def deactivate(self):
+        super().deactivate()
+        for elem in self:
+            elem.deactivate()
 
     def addChild(self, child):
         self._childrens.append(child)
-        self.updateRect()
+        self._updateRect()
 
     def isSelected(self, point):
-        for shape in self._childrens:
-            if shape.isSelected(point):
+        for elem in self:
+            if elem.isSelected(point):
                 return True
         return False
 
     def move_inplace(self, canvas: QRect, dx, dy):
-        if super(Group, self).move_inplace(canvas, dx, dy):
-            for elem in self._childrens:
+        if super().move_inplace(canvas, dx, dy):
+            for elem in self:
                 elem.move_inplace(canvas, dx, dy)
 
     def changesize(self, canvas: QRect, dsize) -> Shape:
-        for elem in self._childrens:
-            old_rect = elem._rect
-            elem._rect = elem._rect + self.addMargins()
-            if not elem.changesize(canvas, dsize):
-                self.canmove = False
-            else: self.canmove = True
-        self.updateRect()
-        return True
+        if super().changesize(canvas, dsize):
+            for i, elem in enumerate(self):
+                if not elem.changesize(canvas, dsize):
+                    for j in range(i):
+                        self[j].changesize(canvas, -dsize)
+                    super().changesize(canvas, - dsize)
+                    break
+            else:
+                self._updateRect()
+                return True
+        return False
 
     def save(self) -> ET:
         element = super().save()
-        group = ET.SubElement(element, 'group')
-        group_elements = ET.SubElement(group, 'group_elements')
-        group_elements.set('group_elements', f'{len(self._childrens)}')
-        for element in group_elements:
-            element = ET.SubElement(element, 'element')
-            element.set('123', '123')
+        items = ET.SubElement(element, 'items')
+        for elem in self:
+            items.append(elem.save())
+        items.set('count_elements', str(len(self)))
         return element
+
+    @classmethod
+    def _factory_load(self, element: ET):
+        group = super()._factory_load(element)
+        items = element.find('items')
+        for item in items:
+            group.addChild(Shape.load(item))
+        return group
 
 
 ### MY STORAGE ###
@@ -262,21 +295,9 @@ class Storage:
     def __getitem__(self, item) -> Shape:
         return self.arr[item]
 
-    def __setitem__(self, item, value):
-        self.arr[item] = value
-        return 0
-
     def addItem(self, item):
-        self.arr.append(item)
-
-    def delItem(self, index):
-        self.arr.pop(index)
-
-    def getItem(self, index):
-        return self.arr[index]
-
-    def insertItem(self, item, index):
-        self.arr.insert(index, item)
+        if item is not None:
+            self.arr.append(item)
 
     def deact_all(self):
         for i in self.arr:
@@ -284,7 +305,7 @@ class Storage:
 
     def deleteAllActive(self):
         for i in range(len(self.arr) - 1, -1, -1):
-            if self.arr[i]._activate:
+            if self.arr[i].getStatus():
                 self.arr.remove(self.arr[i])
 
     def getActiveItems(self):
@@ -293,18 +314,26 @@ class Storage:
                 yield i
 
     def save(self, filename):
-
         root = ET.Element('storage')
         items = ET.SubElement(root, 'items')
-        count_items = 0
         for elem in self:
             items.append(elem.save())
-            count_items += 1
-        items.set('count_elements', str(count_items))
-        print(ET.indent(root, space='  '))
+        items.set('count_elements', str(len(self)))
+        ET.indent(root, space='  ')
         result = ET.tostring(root, encoding='utf-8')
         with open(filename, 'wb') as f:
             f.write(result)
+
+    def clear(self):
+        self.arr.clear()
+
+    def load(self, filename):
+        self.arr.clear()
+        root = ET.parse(filename).getroot()
+        assert root.tag == 'storage'
+        items = root.find('items')
+        for item in items:
+            self.addItem(Shape.load(item))
 
 
 class Window(QMainWindow):
@@ -329,6 +358,7 @@ class Window(QMainWindow):
         Triangle.set_linked_widget(self.ui.trianglebutton)
         self.ui.colorButton.clicked.connect(self.changeColor)
         self.ui.saveButton.clicked.connect(self.saveToFile)
+        self.ui.loadButton.clicked.connect(self.loadFromFile)
         self.active_figure_class = CCircle
         self.active_figure_class.set_is_current(True)
         self.currentColor = self.INITIAL_COLOR
@@ -359,15 +389,21 @@ class Window(QMainWindow):
     def canvasrect(self):
         return QRect(0, self.HEIGHT_HEADER, self.width(), self.height() - self.HEIGHT_HEADER)
 
-    def check(self, point):
+    def check(self, event):
+        cntr_pressed = QApplication.keyboardModifiers() == Qt.ControlModifier
+        point = event.pos()
         for elem in reversed(self.storage):
             if elem.isSelected(point):
+                if not cntr_pressed and not elem.getStatus():
+                    self.storage.deact_all()
                 elem.changeFlag()
                 break
         else:
-            shape = self.active_figure_class(point, self.currentColor)
+            shape = self.active_figure_class(point, self.currentColor, activate=cntr_pressed)
             if shape.is_inner_canvas(self.canvasrect):
                 self.storage.addItem(shape)
+                if not cntr_pressed:
+                    self.storage.deact_all()
 
     def changeColor(self):
         color = QColorDialog.getColor(self.currentColor, self, 'Выберите цвет')
@@ -388,11 +424,7 @@ class Window(QMainWindow):
             shapes.paint(painter)
 
     def mousePressEvent(self, event):
-        modifier = QApplication.keyboardModifiers()
-        if not modifier == Qt.ControlModifier:
-            self.storage.deact_all()
-        point = event.pos()
-        self.check(point)
+        self.check(event)
         self.ui.groupButton.setEnabled(sum(1 for _ in self.storage.getActiveItems()) > 1)
         self.update()
 
@@ -420,10 +452,7 @@ class Window(QMainWindow):
             if elem.getStatus():
                 group.addChild(elem)
         self.storage.deleteAllActive()
-        self.storage.deact_all()
         self.storage.addItem(group)
-        print(group._childrens)
-        print(self.storage.arr)
         self.update()
 
     def saveToFile(self):
@@ -434,11 +463,26 @@ class Window(QMainWindow):
             try:
                 self.storage.save(filename)
             except BaseException as e:
+                logger.error("Ошибка сохранения файла", e)
                 msg.setText("Ошибка сохранения")
                 msg.setIcon(QMessageBox.Critical)
             else:
                 msg.setText(f"Файл '{filename}' успешно сохранен")
             finally:
+                msg.exec_()
+
+    def loadFromFile(self):
+        filename, _ = QFileDialog.getOpenFileName(self, 'Сохранение фигур', filter='*.xml')
+        if filename:
+            try:
+                self.storage.load(filename)
+                self.update()
+            except BaseException as e:
+                msg = QMessageBox(self)
+                msg.setWindowTitle("открытие файла")
+                logger.error("Ошибка открытия файла", e)
+                msg.setText("Ошибка открытия файла")
+                msg.setIcon(QMessageBox.Critical)
                 msg.exec_()
 
 
